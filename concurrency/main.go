@@ -29,7 +29,7 @@ func main() {
 	var wg sync.WaitGroup
 	wg.Add(NUM_TASKS)
 	for i := 0; i < NUM_TASKS; i++ {
-		go runMCTSWorker(values, ch, &mu, &wg)
+		go worker(values, ch, &mu, &wg)
 	}
 
 	for i := range states {
@@ -46,7 +46,7 @@ func main() {
 	fmt.Println("Done!")
 }
 
-func runMCTSWorker(
+func worker(
 	values []int,
 	ch <- chan int, mu *sync.Mutex, wg *sync.WaitGroup) {
 	defer wg.Done()
