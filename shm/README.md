@@ -10,7 +10,7 @@ First ensure that your shm limits are high enough:
 
 ```
 $ sudo sysctl -w kern.sysv | grep shm
-kern.sysv.shmmax: 134217728
+kern.sysv.shmmax=1073741824
 kern.sysv.shmmin: 1
 kern.sysv.shmmni: 1024
 kern.sysv.shmseg: 1024
@@ -25,7 +25,7 @@ kern.sysv.shmall: 262144
 
 They can be changed with `sysctl`:
 
-```$ sudo sysctl -w kern.sysv.shmmax=134217728```
+```$ sudo sysctl -w kern.sysv.shmmax=1073741824```
 
 Or by editing `/etc/sysctl.conf`.
 
@@ -43,21 +43,30 @@ $ go get github.com/gen2brain/shm
 $ go run server.go
 ```
 
+
+The client uses 15 threads, sends 1000 total requests, each 2^25 bytes long:
 ```
 $ go run client.go
-
+1000 15 33554432
 HTTP:
 ...
-Time: 34139065000 ns; qps: 29.291956
+Time: 99952930000 ns; qps: 10.004709
 
 SHM:
 ...
-Time: 32949964000 ns; qps: 30.349047
+Time: 37719854000 ns; qps: 26.511237
 ```
 
-You can also set the number of threads, total requests, and bytes/request:
+You can also pass flags:
 ```
-$ go run client.go --nt=15 --nr=1000 --bytes=33554432
+$ go run client.go -nt=4 -nr=100 -bytes=128000000
+100 4 128000000
+HTTP:
+...
+Time: 34616928000 ns; qps: 2.888760
+SHM:
+...
+Time: 12129793000 ns; qps: 8.244164
 ```
 
 To see all existing shm segments:

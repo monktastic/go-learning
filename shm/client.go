@@ -40,7 +40,7 @@ func timeRequests(numReqs int, numWorkers int, fn func()) {
 
 	start := time.Now()
 	for i := 0; i < numWorkers; i++ {
-	go worker(&mu, &wg, &remaining, shmRequest)
+		go worker(&mu, &wg, &remaining, fn)
 	}
 	wg.Wait()
 	fmt.Println()
@@ -66,6 +66,7 @@ func worker(mu *sync.Mutex, wg *sync.WaitGroup, remaining *int, fn func()) {
 			return
 		} else {
 			fn()
+			fmt.Print(".")
 		}
 	}
 }
@@ -75,14 +76,12 @@ func shmRequest() {
 	if err != nil || reqId < 0 {
 		panic(fmt.Sprintf("Could not shmget %d bytes", MEM_SIZE))
 	}
-	req_bytes, err := shm.At(reqId, 0, 0)
+	reqBytes, err := shm.At(reqId, 0, 0)
 	if err != nil || reqId < 0 {
 		panic(fmt.Sprintf("Could not shmat %d bytes", MEM_SIZE))
 	}
 	
 	url := fmt.Sprintf("http://localhost:8080/%d", reqId)	
-	//fmt.Printf("Calling %s\n", url)
-	fmt.Print(".")
 	resp, _ := http.Get(url)
 	defer resp.Body.Close()
 	respIdBytes, _ := ioutil.ReadAll(resp.Body)
@@ -94,22 +93,20 @@ func shmRequest() {
 		shm.Dt(respBytes)
 		shm.Rm(respId)
 		// Detach request shm.
-		shm.Dt(req_bytes)
+		shm.Dt(reqBytes)
 	}()
 
-	if (bytes.Compare(req_bytes, respBytes) != 0) {
+	if (bytes.Compare(reqBytes, respBytes) != 0) {
 		panic("Request and response were different!")
 	}
 }
 
 func httpRequest() {
 	reqBytes := make([]byte, MEM_SIZE)
-	
-	resp, _ := http.Post("http://localhost:8080/http", 
-		"application/octet-stream", bytes.NewBuffer(reqBytes))
+
+	resp, _ := http.Post("http://localhost:8080/http", "", bytes.NewBuffer(reqBytes))
 	defer resp.Body.Close()
 	respBytes, _ := ioutil.ReadAll(resp.Body)
-	
 	if (bytes.Compare(reqBytes, respBytes) != 0) {
 		panic("Request and response were different!")
 	}

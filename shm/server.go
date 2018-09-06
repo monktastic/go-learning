@@ -42,9 +42,11 @@ func shmHandler(w http.ResponseWriter, r *http.Request) {
 func httpHandler(w http.ResponseWriter, r *http.Request) {
 	reqBytes, _ := ioutil.ReadAll(r.Body)
 	respBytes := make([]byte, len(reqBytes))
+	fmt.Printf("Handling HTTP request of length %d\n", len(reqBytes))
 
 	copy(respBytes[:], reqBytes)
-	fmt.Fprint(w, respBytes)
+	fmt.Printf("Responding with length %d\n", len(respBytes))
+	w.Write(respBytes)
 }
 
 func main() {
