@@ -66,30 +66,31 @@ func main() {
 			"to run common SHM)")
 	}
 
-	/////////
-	fmt.Println("SHM over UDS:")
-	timeRequests(*nr, *nt, udsShmRequest)
 
+	CLIENT_MEMORY = make([]byte, MEM_SIZE)
+
+	/////////
+	fmt.Println("UDS:")
+	timeRequests(*nr, *nt, udsRequest)
+
+	/////////
+	fmt.Println("HTTP:")
+	timeRequests(*nr, *nt, httpRequest)
+
+	
 	/////////
 	fmt.Println("SHM over Q:")
 	timeRequests(*nr, *nt, queueShmRequest)
+
+	/////////
+	fmt.Println("SHM over UDS:")
+	timeRequests(*nr, *nt, udsShmRequest)
 
 	/////////
 	fmt.Println("SHM over HTTP:")
 	timeRequests(*nr, *nt, httpShmRequest)
 
 	/////////////////////
-
-	
-	CLIENT_MEMORY = make([]byte, MEM_SIZE)
-	
-	/////////
-	fmt.Println("HTTP:")
-	timeRequests(*nr, *nt, httpRequest)
-
-	/////////
-	fmt.Println("UDS:")
-	timeRequests(*nr, *nt, udsRequest)
 
 	
 	fmt.Println("Done")

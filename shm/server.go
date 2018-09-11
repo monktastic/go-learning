@@ -74,9 +74,9 @@ func httpHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	go queueShmHandler()
-	go udsShmHandler()
-	go udsHandler()
+	go queueShmAccept()
+	go udsShmAccept()
+	go udsAccept()
 	go udsCommonShmHandler()
 	http.HandleFunc("/shm/", httpShmHandler)
 	http.HandleFunc("/http/", httpHandler)
@@ -85,7 +85,7 @@ func main() {
 
 
 // Handles data over UDS
-func udsHandler() {
+func udsAccept() {
 	ln, err := net.Listen("unix", "/tmp/uds.sock")
 	if err != nil {
 		log.Fatal("Listen error: ", err)
@@ -105,20 +105,21 @@ func udsHandler() {
 		if err != nil {
 			log.Fatal("Accept error: ", err)
 		}
-		fmt.Println("Accepted")
-
-		sizeBytes := make([]byte, 4)
-		fd.Read(sizeBytes[:])
-		size := binary.LittleEndian.Uint32(sizeBytes)
-		fmt.Printf("Receiving %d bytes\n", size)
-
-		reqBytes := make([]byte, size)
-		io.ReadFull(fd, reqBytes)
-		fd.Write(reqBytes)
-		fd.Close()
+		go udsHandler(&fd)
 	}
 }
 
+func udsHandler(fd *net.Conn) {
+	sizeBytes := make([]byte, 4)
+	(*fd).Read(sizeBytes[:])
+	size := binary.LittleEndian.Uint32(sizeBytes)
+	fmt.Printf("Receiving %d bytes\n", size)
+
+	reqBytes := make([]byte, size)
+	io.ReadFull(*fd, reqBytes)
+	(*fd).Write(reqBytes)
+	(*fd).Close()
+}
 
 // Uses UDS just to indicate that a request has come in (and to signal a
 // response). Keeps the socket open.
@@ -186,7 +187,7 @@ func udsCommonShmHandler() {
 
 
 // Gets requests over UDS containing (new) shm id.
-func udsShmHandler() {
+func udsShmAccept() {
 	ln, err := net.Listen("unix", "/tmp/uds-shm.sock")
 	if err != nil {
 		log.Fatal("Listen error: ", err)
@@ -207,32 +208,35 @@ func udsShmHandler() {
 		if err != nil {
 			log.Fatal("Accept error: ", err)
 		}
-		
-		buf := make([]byte, 4)
-		_, err = fd.Read(buf)
-		if err != nil {
-			return
-		}
-		
-		// Retrieve the shm id.
-		reqShmId := binary.LittleEndian.Uint32(buf)
-		fmt.Printf("Server got %d\n", reqShmId)
-
-		respId := respondToShm(int(reqShmId))
-		
-		respBytes := make([]byte, 4)
-		binary.LittleEndian.PutUint32(respBytes, uint32(respId))
-		_, err = fd.Write(respBytes)
-		if err != nil {
-			log.Fatal("Writing client error: ", err)
-		}
-		
-		fd.Close()
+		go udsShmHandler(&fd)
 	}
 }
 
+func udsShmHandler(fd *net.Conn) {
+	buf := make([]byte, 4)
+	_, err := (*fd).Read(buf)
+	if err != nil {
+		return
+	}
+
+	// Retrieve the shm id.
+	reqShmId := binary.LittleEndian.Uint32(buf)
+	fmt.Printf("Server got %d\n", reqShmId)
+
+	respId := respondToShm(int(reqShmId))
+
+	respBytes := make([]byte, 4)
+	binary.LittleEndian.PutUint32(respBytes, uint32(respId))
+	_, err = (*fd).Write(respBytes)
+	if err != nil {
+		log.Fatal("Writing client error: ", err)
+	}
+
+	(*fd).Close()
+}
+
 // Uses sysv queue to receive shm id.
-func queueShmHandler() {
+func queueShmAccept() {
 	fmt.Println("Started shm handler")
 	_, err := os.Create("/tmp/server.8080")
 	if err != nil {
@@ -274,15 +278,20 @@ func queueShmHandler() {
 		fmt.Fscanf(bytes.NewReader(respBytes), "%d %d", &reqMtype, &reqShmId)
 		fmt.Printf("Read message: mtype %d shmid %d\n", reqMtype, reqShmId)
 
-		respId := respondToShm(reqShmId)
-	
-		// Send null-terminated string.
-		message := []byte(fmt.Sprintf("%d%c", respId, 0))
-		msg := &ipc.Msgbuf{Mtype: reqMtype, Mtext: message}
-		err = ipc.Msgsnd(qid, msg, 0)
-		fmt.Printf("Sent response [%s]\n", message)
-		if err != nil {
-			panic(err)
-		}
+		go queueShmHandler(reqShmId, reqMtype, qid)
+	}
+}
+
+
+func queueShmHandler(reqShmId int, reqMtype uint64, qid uint64) {
+	respId := respondToShm(reqShmId)
+
+	// Send null-terminated string.
+	message := []byte(fmt.Sprintf("%d%c", respId, 0))
+	msg := &ipc.Msgbuf{Mtype: reqMtype, Mtext: message}
+	err := ipc.Msgsnd(qid, msg, 0)
+	fmt.Printf("Sent response [%s]\n", message)
+	if err != nil {
+		panic(err)
 	}
 }
