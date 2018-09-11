@@ -1,4 +1,12 @@
+/*
 
+Modes:
+ - HTTP: Send all data over HTTP POST.
+ - SHM-HTTP: Send the request shared memory ID over HTTP, get back a response
+     shared memory ID.
+ - SHM: Send the request shared memory ID via sysv queue.
+ - common-SHM: Server and client share the same space.
+ */
 package main
 
 import (
@@ -8,11 +16,22 @@ import (
 	"log"
 	"strconv"
 	"io/ioutil"
+	"github.com/siadat/ipc"
+	"bytes"
+	"os"
+	"syscall"
+	"strings"
+	"net"
+	"os/signal"
+	"encoding/binary"
+	"io"
 )
 
-func shmHandler(w http.ResponseWriter, r *http.Request) {
-	reqId, _ := strconv.Atoi(r.URL.Path[1:])
-	fmt.Printf("Reading from request id %d\n", reqId)
+var COMMON_SHM_SIZE = 1<<25
+var COMMON_SOCK = "/tmp/uds-common-shm.sock"
+
+// Given a shm id, copies the memory into a new shm and returns the new id.
+func respondToShm(reqId int) int {
 	reqBytes, _ := shm.At(reqId, 0, 0)
 
 	shmSize := len(reqBytes)
@@ -34,6 +53,15 @@ func shmHandler(w http.ResponseWriter, r *http.Request) {
 	// Detach response.
 	shm.Dt(respBytes)
 	
+	return respId
+}
+
+func httpShmHandler(w http.ResponseWriter, r *http.Request) {
+	parts := strings.SplitAfter(r.URL.Path, "/")
+	reqId, _ := strconv.Atoi(parts[2])
+	fmt.Printf("Reading from request id %d\n", reqId)
+	
+	respId := respondToShm(reqId)
 	fmt.Printf("Writing to %d\n", respId)
 	fmt.Fprintf(w, "%d", respId)
 }
@@ -41,17 +69,220 @@ func shmHandler(w http.ResponseWriter, r *http.Request) {
 
 func httpHandler(w http.ResponseWriter, r *http.Request) {
 	reqBytes, _ := ioutil.ReadAll(r.Body)
-	respBytes := make([]byte, len(reqBytes))
 	fmt.Printf("Handling HTTP request of length %d\n", len(reqBytes))
-
-	copy(respBytes[:], reqBytes)
-	fmt.Printf("Responding with length %d\n", len(respBytes))
-	w.Write(respBytes)
+	w.Write(reqBytes)
 }
 
 func main() {
-	http.HandleFunc("/", shmHandler)
-	http.HandleFunc("/http", httpHandler)
+	go queueShmHandler()
+	go udsShmHandler()
+	go udsHandler()
+	go udsCommonShmHandler()
+	http.HandleFunc("/shm/", httpShmHandler)
+	http.HandleFunc("/http/", httpHandler)
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
+
+// Handles data over UDS
+func udsHandler() {
+	ln, err := net.Listen("unix", "/tmp/uds.sock")
+	if err != nil {
+		log.Fatal("Listen error: ", err)
+	}
+
+	sigc := make(chan os.Signal, 1)
+	signal.Notify(sigc, os.Interrupt, syscall.SIGTERM)
+	signal.Notify(sigc, os.Interrupt, syscall.SIGINT)
+	go func(ln net.Listener, c chan os.Signal) {
+		sig := <-c
+		log.Printf("Caught signal %s: shutting down uds.", sig)
+		ln.Close()
+	}(ln, sigc)
+
+	for {
+		fd, err := ln.Accept()
+		if err != nil {
+			log.Fatal("Accept error: ", err)
+		}
+		fmt.Println("Accepted")
+
+		sizeBytes := make([]byte, 4)
+		fd.Read(sizeBytes[:])
+		size := binary.LittleEndian.Uint32(sizeBytes)
+		fmt.Printf("Receiving %d bytes\n", size)
+
+		reqBytes := make([]byte, size)
+		io.ReadFull(fd, reqBytes)
+		fd.Write(reqBytes)
+		fd.Close()
+	}
+}
+
+
+// Uses UDS just to indicate that a request has come in (and to signal a
+// response). Keeps the socket open.
+func udsCommonShmHandler() {
+	ln, err := net.Listen("unix", COMMON_SOCK)
+	if err != nil {
+		log.Fatal("Listen error: ", err)
+	}
+	
+	key, err := ipc.Ftok(COMMON_SOCK, 0)
+	if err != nil {
+		panic(err)
+	}
+	id, err := shm.Get(int(key), COMMON_SHM_SIZE, shm.IPC_CREAT|0777)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("Created common shm at key %d\n", id)
+	shmData, err := shm.At(id, 0, 0)
+
+	sigc := make(chan os.Signal, 1)
+	signal.Notify(sigc, os.Interrupt, syscall.SIGTERM)
+	signal.Notify(sigc, os.Interrupt, syscall.SIGINT)
+	go func(ln net.Listener, c chan os.Signal) {
+		sig := <-c
+		log.Printf("Caught signal %s: shutting down uds/common shm.", sig)
+		ln.Close()
+	}(ln, sigc)
+	
+	// Keep alive
+	fd, err := ln.Accept()
+	if err != nil {
+		log.Fatal("Accept error: ", err)
+	} else {
+		fmt.Println("Accepted on 'common' socket")
+	}
+
+	for {
+		buf := make([]byte, 4)
+		_, err = fd.Read(buf)
+		if err != nil {
+			return
+		}
+
+		// Retrieve the request size
+		reqSize := binary.LittleEndian.Uint32(buf)
+		fmt.Printf("Request size %d\n", reqSize)
+		req := make([]byte, reqSize)
+
+		copy(shmData[:reqSize], req)
+		
+		// Write the response size
+		respBytes := make([]byte, 4)
+		binary.LittleEndian.PutUint32(respBytes, uint32(reqSize))
+		_, err = fd.Write(respBytes)
+		if err != nil {
+			log.Fatal("Writing client error: ", err)
+		} else {
+			fmt.Printf("Wrote %d bytes\n", len(respBytes))
+		}
+	}
+	
+	fd.Close()
+}
+
+
+// Gets requests over UDS containing (new) shm id.
+func udsShmHandler() {
+	ln, err := net.Listen("unix", "/tmp/uds-shm.sock")
+	if err != nil {
+		log.Fatal("Listen error: ", err)
+	}
+
+	sigc := make(chan os.Signal, 1)
+	signal.Notify(sigc, os.Interrupt, syscall.SIGTERM)
+	signal.Notify(sigc, os.Interrupt, syscall.SIGINT)
+	go func(ln net.Listener, c chan os.Signal) {
+		sig := <-c
+		log.Printf("Caught signal %s: shutting down uds/shm.", sig)
+		ln.Close()
+	}(ln, sigc)
+
+
+	for {
+		fd, err := ln.Accept()
+		if err != nil {
+			log.Fatal("Accept error: ", err)
+		}
+		
+		buf := make([]byte, 4)
+		_, err = fd.Read(buf)
+		if err != nil {
+			return
+		}
+		
+		// Retrieve the shm id.
+		reqShmId := binary.LittleEndian.Uint32(buf)
+		fmt.Printf("Server got %d\n", reqShmId)
+
+		respId := respondToShm(int(reqShmId))
+		
+		respBytes := make([]byte, 4)
+		binary.LittleEndian.PutUint32(respBytes, uint32(respId))
+		_, err = fd.Write(respBytes)
+		if err != nil {
+			log.Fatal("Writing client error: ", err)
+		}
+		
+		fd.Close()
+	}
+}
+
+// Uses sysv queue to receive shm id.
+func queueShmHandler() {
+	fmt.Println("Started shm handler")
+	_, err := os.Create("/tmp/server.8080")
+	if err != nil {
+		panic(err)
+	}
+	
+	// Get the server key and queue id.
+	key, err := ipc.Ftok("/tmp/server.8080", 0)
+	if err != nil {
+		panic(err)
+	}
+
+	var qid uint64
+	for ;; {
+		qid, err = ipc.Msgget(key, ipc.IPC_CREAT | ipc.IPC_EXCL | 0777)
+		if err == nil {
+			break
+		} else if err == syscall.EEXIST {
+			qid, err = ipc.Msgget(key, 0777)
+			fmt.Printf("Deleting queue %d and re-creating\n", qid)
+			err = ipc.Msgctl(qid, ipc.IPC_RMID)
+			if err != nil {
+				panic(fmt.Errorf("Could not delete queue %d", qid))
+			}
+		} else {
+			panic(err)
+		}
+	}
+	
+	fmt.Printf("Opened queue at key %d, id %d\n", key, qid)
+
+	for {
+		rcvBuf := &ipc.Msgbuf{Mtype: 1}
+		ipc.Msgrcv(qid, rcvBuf, 0)
+		respBytes := rcvBuf.Mtext
+		
+		var reqMtype uint64
+		var reqShmId int
+		fmt.Fscanf(bytes.NewReader(respBytes), "%d %d", &reqMtype, &reqShmId)
+		fmt.Printf("Read message: mtype %d shmid %d\n", reqMtype, reqShmId)
+
+		respId := respondToShm(reqShmId)
+	
+		// Send null-terminated string.
+		message := []byte(fmt.Sprintf("%d%c", respId, 0))
+		msg := &ipc.Msgbuf{Mtype: reqMtype, Mtext: message}
+		err = ipc.Msgsnd(qid, msg, 0)
+		fmt.Printf("Sent response [%s]\n", message)
+		if err != nil {
+			panic(err)
+		}
+	}
+}
