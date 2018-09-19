@@ -17,15 +17,15 @@ import (
 	"net"
 	"log"
 	"encoding/binary"
+	common "github.com/monktastic/go-learning/shm"
 )
 
 type requester func()
 var MEM_SIZE int
 
-var COMMON_SHM_SIZE = 1<<25
-var COMMON_SOCK = "/tmp/uds-common-shm.sock"
-
+// Some data for client to send over HTTP/UDS, created just once.
 var CLIENT_MEMORY []byte
+
 
 
 func main() {
@@ -38,23 +38,16 @@ func main() {
 	fmt.Printf("%d %d %d\n", *nr, *nt, MEM_SIZE)
 
 	/////////
-	if (*nt == 1 && MEM_SIZE <= COMMON_SHM_SIZE) {
+	if (*nt == 1 && MEM_SIZE <= common.COMMON_SHM_SIZE) {
 		fmt.Println("Common SHM over UDS:")
-		conn, err := net.Dial("unix", COMMON_SOCK)
+		conn, err := net.Dial("unix", common.COMMON_SOCK)
 		if err != nil {
 			log.Fatal("Dial error", err)
 		}
 		//defer conn.Close()
 
-		key, err := ipc.Ftok(COMMON_SOCK, 0)
-		if err != nil {
-			panic(err)
-		}
-		if key <= 0 {
-			panic(fmt.Sprintf("Bad key: %d\n", key))
-		}
-		id, err := shm.Get(int(key), COMMON_SHM_SIZE, 0777)
-		shmBytes, err := shm.At(id, 0, 0)
+		id, err := common.ReadInt(&conn)
+		shmBytes, err := shm.At(int(id), 0, 0)
 		if err != nil {
 			panic(err)
 		}
@@ -99,19 +92,13 @@ func main() {
 
 func getUdsCommonShmRequest(conn net.Conn, shmBytes []byte) func() {
 	return func() {
-		//reqBytes := make([]byte, MEM_SIZE)
-		//copy(shmBytes, reqBytes)
-	
 		// Tell server the request length.
-		buf := make([]byte, 4)
-		binary.LittleEndian.PutUint32(buf, uint32(MEM_SIZE))
-		_, err := conn.Write(buf)
+		err := common.WriteInt(conn, uint32(MEM_SIZE))
 		if err != nil {
 			panic(err)
 		}
-		
-		_, err = conn.Read(buf)
-		respByteSize := binary.LittleEndian.Uint32(buf)
+	
+		respByteSize, err := common.ReadInt(conn)
 		if err != nil {
 			panic(err)
 		}

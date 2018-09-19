@@ -25,10 +25,10 @@ import (
 	"os/signal"
 	"encoding/binary"
 	"io"
+	common "github.com/monktastic/go-learning/shm"
 )
 
-var COMMON_SHM_SIZE = 1<<25
-var COMMON_SOCK = "/tmp/uds-common-shm.sock"
+
 
 // Given a shm id, copies the memory into a new shm and returns the new id.
 func respondToShm(reqId int) int {
@@ -77,7 +77,7 @@ func main() {
 	go queueShmAccept()
 	go udsShmAccept()
 	go udsAccept()
-	go udsCommonShmHandler()
+	go udsCommonShmAccept()
 	http.HandleFunc("/shm/", httpShmHandler)
 	http.HandleFunc("/http/", httpHandler)
 	log.Fatal(http.ListenAndServe(":8080", nil))
@@ -92,8 +92,7 @@ func udsAccept() {
 	}
 
 	sigc := make(chan os.Signal, 1)
-	signal.Notify(sigc, os.Interrupt, syscall.SIGTERM)
-	signal.Notify(sigc, os.Interrupt, syscall.SIGINT)
+	signal.Notify(sigc, os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
 	go func(ln net.Listener, c chan os.Signal) {
 		sig := <-c
 		log.Printf("Caught signal %s: shutting down uds.", sig)
@@ -111,7 +110,7 @@ func udsAccept() {
 
 func udsHandler(fd *net.Conn) {
 	sizeBytes := make([]byte, 4)
-	(*fd).Read(sizeBytes[:])
+	(*fd).Read(sizeBytes)
 	size := binary.LittleEndian.Uint32(sizeBytes)
 	fmt.Printf("Receiving %d bytes\n", size)
 
@@ -123,66 +122,78 @@ func udsHandler(fd *net.Conn) {
 
 // Uses UDS just to indicate that a request has come in (and to signal a
 // response). Keeps the socket open.
-func udsCommonShmHandler() {
-	ln, err := net.Listen("unix", COMMON_SOCK)
+func udsCommonShmAccept() {
+	ln, err := net.Listen("unix", common.COMMON_SOCK)
 	if err != nil {
 		log.Fatal("Listen error: ", err)
 	}
-	
-	key, err := ipc.Ftok(COMMON_SOCK, 0)
-	if err != nil {
-		panic(err)
-	}
-	id, err := shm.Get(int(key), COMMON_SHM_SIZE, shm.IPC_CREAT|0777)
-	if err != nil {
-		panic(err)
-	}
-	fmt.Printf("Created common shm at key %d\n", id)
-	shmData, err := shm.At(id, 0, 0)
 
+	// Close the socket on signals.
 	sigc := make(chan os.Signal, 1)
-	signal.Notify(sigc, os.Interrupt, syscall.SIGTERM)
-	signal.Notify(sigc, os.Interrupt, syscall.SIGINT)
+	signal.Notify(sigc, os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
 	go func(ln net.Listener, c chan os.Signal) {
 		sig := <-c
-		log.Printf("Caught signal %s: shutting down uds/common shm.", sig)
+		log.Printf("Caught signal %s: shutting down %s", sig, common.COMMON_SOCK)
 		ln.Close()
 	}(ln, sigc)
-	
-	// Keep alive
-	fd, err := ln.Accept()
-	if err != nil {
-		log.Fatal("Accept error: ", err)
-	} else {
-		fmt.Println("Accepted on 'common' socket")
-	}
 
-	for {
-		buf := make([]byte, 4)
-		_, err = fd.Read(buf)
+	for i := 0; ; i++ {
+		fd, err := ln.Accept()
 		if err != nil {
-			return
+			log.Fatal("Accept error: ", err)
+			continue
+		} else {
+			fmt.Printf(
+				"Accepted connection #%d on 'common' socket\n", i)
 		}
 
-		// Retrieve the request size
-		reqSize := binary.LittleEndian.Uint32(buf)
-		fmt.Printf("Request size %d\n", reqSize)
-		req := make([]byte, reqSize)
+		go udsCommonShmHandler(i, &fd)
+	}
+}
 
-		copy(shmData[:reqSize], req)
+func udsCommonShmHandler(i int, fd *net.Conn) {
+	// Create shm.
+	socketName := fmt.Sprintf("%s-%d", common.COMMON_SOCK, i)
+	os.Create(socketName)
+	key, err := ipc.Ftok(socketName, 0)
+	if err != nil {
+		panic(err)
+	}
+	id, err := shm.Get(int(key), common.COMMON_SHM_SIZE, shm.IPC_CREAT|0777)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("Created common shm at key %d, id %d\n", key, id)
+	shmData, err := shm.At(id, 0, 0)
+
+	// Send the shm id.
+	common.WriteInt(fd, uint32(id))
+	
+	for {
+		reqSize, err := common.ReadInt(fd)
+		if err != nil {
+			log.Printf("Read failed: %s\n", err)
+			break
+		}
+		fmt.Printf("Request size %d\n", reqSize)
 		
+		//req := make([]byte, reqSize)
+		//copy(shmData[:reqSize], req)
+
 		// Write the response size
-		respBytes := make([]byte, 4)
-		binary.LittleEndian.PutUint32(respBytes, uint32(reqSize))
-		_, err = fd.Write(respBytes)
+		err = common.WriteInt(fd, reqSize)
 		if err != nil {
 			log.Fatal("Writing client error: ", err)
+			break
 		} else {
-			fmt.Printf("Wrote %d bytes\n", len(respBytes))
+			fmt.Println("Wrote response size")
 		}
 	}
-	
-	fd.Close()
+
+	(*fd).Close()
+	os.Remove(socketName)
+	shm.Dt(shmData)
+	shm.Rm(id)
 }
 
 
@@ -194,8 +205,7 @@ func udsShmAccept() {
 	}
 
 	sigc := make(chan os.Signal, 1)
-	signal.Notify(sigc, os.Interrupt, syscall.SIGTERM)
-	signal.Notify(sigc, os.Interrupt, syscall.SIGINT)
+	signal.Notify(sigc, os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
 	go func(ln net.Listener, c chan os.Signal) {
 		sig := <-c
 		log.Printf("Caught signal %s: shutting down uds/shm.", sig)
