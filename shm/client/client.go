@@ -16,8 +16,10 @@ import (
 	"math/rand"
 	"net"
 	"log"
+	"syscall"
 	"encoding/binary"
 	common "github.com/monktastic/go-learning/shm"
+	"os/signal"
 )
 
 type requester func()
@@ -38,21 +40,36 @@ func main() {
 	fmt.Printf("%d %d %d\n", *nr, *nt, MEM_SIZE)
 
 	/////////
+	var shmId int
 	if (*nt == 1 && MEM_SIZE <= common.COMMON_SHM_SIZE) {
 		fmt.Println("Common SHM over UDS:")
 		conn, err := net.Dial("unix", common.COMMON_SOCK)
 		if err != nil {
 			log.Fatal("Dial error", err)
 		}
-		//defer conn.Close()
+		
+		shmId, err = shm.Get(shm.IPC_PRIVATE, common.COMMON_SHM_SIZE, shm.IPC_CREAT|0777)
+		if err != nil || shmId < 0 {
+			panic(fmt.Sprintf("Could not shmget %d bytes", common.COMMON_SHM_SIZE))
+		}
 
-		id, err := common.ReadInt(&conn)
-		shmBytes, err := shm.At(int(id), 0, 0)
+		sigc := make(chan os.Signal, 1)
+		signal.Notify(sigc, os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
+		go func(conn *net.Conn, c chan os.Signal) {
+			sig := <-c
+			log.Printf("Caught signal %s: shutting down", sig)
+			shm.Rm(shmId)
+			(*conn).Close()
+			os.Exit(-1)
+		}(&conn, sigc)
+
+		shmBytes, err := shm.At(shmId, 0, 0)
+		common.WriteInt(&conn, uint32(shmId))
 		if err != nil {
 			panic(err)
 		}
 
-		f := getUdsCommonShmRequest(conn, shmBytes)
+		f := getUdsCommonShmRequest(&conn, shmBytes)
 		timeRequests(*nr, *nt, f)
 	} else {
 		fmt.Println("(Must have 1 thread and bytes < COMMON_SHM_SIZE " +
@@ -90,7 +107,7 @@ func main() {
 }
 
 
-func getUdsCommonShmRequest(conn net.Conn, shmBytes []byte) func() {
+func getUdsCommonShmRequest(conn *net.Conn, shmBytes []byte) func() {
 	return func() {
 		// Tell server the request length.
 		err := common.WriteInt(conn, uint32(MEM_SIZE))

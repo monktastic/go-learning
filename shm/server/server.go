@@ -152,22 +152,11 @@ func udsCommonShmAccept() {
 }
 
 func udsCommonShmHandler(i int, fd *net.Conn) {
-	// Create shm.
-	socketName := fmt.Sprintf("%s-%d", common.COMMON_SOCK, i)
-	os.Create(socketName)
-	key, err := ipc.Ftok(socketName, 0)
+	id, _ := common.ReadInt(fd)
+	shmData, err := shm.At(int(id), 0, 0)
 	if err != nil {
 		panic(err)
 	}
-	id, err := shm.Get(int(key), common.COMMON_SHM_SIZE, shm.IPC_CREAT|0777)
-	if err != nil {
-		panic(err)
-	}
-	fmt.Printf("Created common shm at key %d, id %d\n", key, id)
-	shmData, err := shm.At(id, 0, 0)
-
-	// Send the shm id.
-	common.WriteInt(fd, uint32(id))
 	
 	for {
 		reqSize, err := common.ReadInt(fd)
@@ -191,9 +180,7 @@ func udsCommonShmHandler(i int, fd *net.Conn) {
 	}
 
 	(*fd).Close()
-	os.Remove(socketName)
 	shm.Dt(shmData)
-	shm.Rm(id)
 }
 
 
